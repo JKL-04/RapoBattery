@@ -1,0 +1,333 @@
+# 技术文档
+
+本文面向想读代码、改代码或移植到其它型号的人。  
+只想使用的话看 [README](../README.md) 就够了。
+
+---
+
+## 目录
+
+- [工作原理](#工作原理)
+- [为什么需要管理员权限](#为什么需要管理员权限)
+- [为什么不能发握手帧](#为什么不能发握手帧)
+- [图标是怎么画出来的](#图标是怎么画出来的)
+- [源码结构](#源码结构)
+- [构建细节](#构建细节)
+- [重新生成字形数据](#重新生成字形数据)
+- [已知限制的技术原因](#已知限制的技术原因)
+
+---
+
+## 工作原理
+
+程序以**纯只读**方式从 HID 接口读取电量：
+
+```
+打开厂商集合   usagePage = 0xFF00, usage = 0x000F   (col06)
+读取 Feature report ID = 8，缓冲 250 字节
+电量百分比 = 返回数据 byte[88]      (取值 0..100)
+```
+
+**全程不向设备写入任何数据。** 句柄在启动时打开一次并保持复用，  
+避免反复 `CreateFile` / `CloseHandle` 扰动 2.4G 链路。
+
+实测验证记录（官方网页驱动显示值 vs `byte[88]`）：
+
+| 官方显示              | `byte[88]`  | 结果 |
+| ----------------- | ----------- | -- |
+| 87%               | `0x57` = 87 | ✓  |
+| 充电中 94%（读取瞬间 92%） | `0x5C` = 92 | ✓  |
+| 93%               | `0x5D` = 93 | ✓  |
+| 92%               | `0x5C` = 92 | ✓  |
+
+### 三个容易踩的点
+
+**一、必须超额申请缓冲。**  
+`FeatureReportByteLength` 只是**声明长度**（本设备为 33 字节），  
+但设备实际返回更多数据 —— 电量在 `byte[88]`，远超声明长度。  
+按声明长度分配缓冲就永远读不到电量，必须申请 **250 字节**。
+
+**二、必须区分空帧。**  
+设备在唤醒间隙会返回整块全零的缓冲，其首字节也不是正常的 `0x01`。  
+不做区分就会把空帧当成 **0% 电量**显示。
+
+```cpp
+int bat = buf[88];
+if (bat == 0) {
+    bool payloadAllZero = true;
+    for (size_t k = 1; k < buf.size(); ++k)
+        if (buf[k]) { payloadAllZero = false; break; }
+
+    // 全零缓冲，或首字节不是 0x01 —— 都是空帧，丢弃
+    if (payloadAllZero || buf[0] != 0x01) return false;
+}
+if (bat > 100) return false;     // 越界值同样丢弃
+```
+
+丢弃后保留上一次的有效值，不会跳变成 0%。
+
+**三、重试一次能显著减少误报。**  
+单次失败往往只是设备恰好处于休眠唤醒间隙。  
+重试同样只读，无副作用。
+
+完整的设备能力矩阵、字节验证数据和排除干扰字节的方法见  
+[协议记录](PROTOCOL.md)。
+
+---
+
+## 为什么需要管理员权限
+
+`Shell_NotifyIcon` 的实现是**向任务栏窗口发送消息**。  
+Windows 任务栏进程的完整性级别通常高于普通进程，  
+用户界面特权隔离（UIPI）会拦截这些消息，  
+导致托盘图标注册返回 `ERROR_ACCESS_DENIED (5)`。
+
+程序通过清单声明 `requireAdministrator`，并显式放行托盘相关消息：
+
+```cpp
+ChangeWindowMessageFilterEx(hwnd, WM_COPYDATA, MSGFLT_ALLOW, nullptr);
+ChangeWindowMessageFilterEx(hwnd, 0x004A /* WM_COPYGLOBALDATA */, MSGFLT_ALLOW, nullptr);
+ChangeWindowMessageFilterEx(hwnd, RegisterWindowMessageW(L"TaskbarCreated"), MSGFLT_ALLOW, nullptr);
+// ...以及 WM_USER+1 .. WM_USER+5
+```
+
+**这也决定了开机自启不能用注册表实现。**  
+`HKCU\...\Run` 启动的进程不会提权，托盘图标会注册失败。  
+程序改用任务计划程序，并勾选「使用最高权限运行」（`/RL HIGHEST`）。
+
+---
+
+## 为什么不能发握手帧
+
+早期实现认为需要先向 `col05` 的 output report 6 发送一帧  
+`A5 A3 00 00 00 00 00 00` 作为「握手」。
+
+**这个判断是错的，而且有害。**
+
+| 假设            | 实测结果                        |
+| ------------- | --------------------------- |
+| 「必须先握手才能读到电量」 | ❌ 完全不写设备也能稳定读到（5/5 成功）      |
+| 「定期握手能维持链路」   | ❌ 每 30 秒重复发送会**打断 2.4G 链路** |
+
+握手帧的实际后果是**鼠标失灵、断连重连**。
+
+因此所有 `HidD_SetFeature` / `HidD_SetOutputReport` 调用已被彻底移除，  
+程序现在是纯只读的。
+
+---
+
+## 图标是怎么画出来的
+
+托盘数字**不是用 GDI 字体渲染的**，而是把 SVG 轮廓展平成多边形后逐像素绘制。
+
+### 为什么不用 GDI 字体
+
+- ClearType 在 Alpha 位上会产生**黑边**
+- 字体缩放会失真
+
+### 渲染管线
+
+```
+SVG  →  tools/svg2cpp.py  →  src/glyphs_gen.h  →  逐像素绘制
+        （展平贝塞尔曲线）      （多边形数据）
+```
+
+绘制流程：
+
+1. 按系统 DPI 计算托盘图标实际像素尺寸（100% → 16px，125% → 20px，150% → 24px）
+2. 在 **8 倍超采样画布**上逐像素求值
+3. 盒式平均降采样到目标尺寸
+
+超采样是必要的：20×20 的图标里数字笔画不到 1.5 像素宽，  
+不做超采样会严重锯齿。
+
+### 逐像素求值
+
+对每个像素中心点做两件事：
+
+- **非零环绕规则**判断内外（外轮廓逆时针、内孔顺时针）
+- 求**到边界的最短距离**
+
+一次求值同时得到这两个信息，所以描边不需要额外绘制：  
+内部填填充色，外部的描边带按距离淡出。
+
+> **这里曾经有个隐藏很久的 bug。** 覆盖率写成>   
+> `inside ? Clamp01f(0.5f - minD) + 0.5f : ...`，>   
+> 而 `Clamp01f` 会先把 `(0.5f - minD)` 压到 0 ——>   
+> 于是**任何离边界超过半个像素的内部像素，覆盖率都恰好是 0.5**。>   
+> 整个字形被画成半透明（alpha≈128），看起来灰蒙蒙的。
+>
+> 正确的有符号距离覆盖率：
+>
+> ```cpp
+> float cov = inside ? Clamp01f(0.5f + minD) : Clamp01f(0.5f - minD);
+> ```
+>
+> 两者在边界处都是 0.5，过渡平滑；内部离边界超过 0.5 像素即达到完全不透明。
+
+### 等宽排版
+
+取最宽数字的宽高比作为统一字宽，所有数字按同一宽度排版，否则参差不齐。
+
+### 字高基准固定
+
+字高基准固定为 **2 位数**。早期版本字高是从可用**宽度**推导的，  
+而宽度取决于位数，导致「7」被渲染成「92」的 1.6 倍大。  
+现在 1~2 位共用同一字号，3 位数才按宽度等比缩小。
+
+---
+
+## 源码结构
+
+全部代码在单个文件 `src/RapooBattery.cpp` 里（约 1600 行），按以下顺序组织：
+
+| 区块       | 内容                                                       |
+| -------- | -------------------------------------------------------- |
+| 常量       | VID、报告 ID、字节偏移、定时器 id、面板尺寸                               |
+| 全局状态     | `struct State g` —— 句柄、电量、配置                             |
+| 小工具      | `NowMs`、`FormatReadTime`、`Dbg` 日志                        |
+| 配置持久化    | 注册表读写（`HKCU\Software\RapooBattery`）                      |
+| 开机自启     | 任务计划程序的创建 / 查询 / 删除                                      |
+| HID 设备发现 | `FindRapooCollections` 枚举厂商集合                            |
+| 读取电量     | `ReadBattery`（纯只读）                                       |
+| UIPI 放行  | `AllowTrayMessages`                                      |
+| 图标绘制     | `BlendPixel` / `FillGlyphOutline` / `MakeIcon`           |
+| 界面刷新     | `RefreshTray` / `RefreshTipOnly` / `DoPoll`              |
+| 浮窗面板     | `BuildRows` / `PaintPanel` / `PanelProc` / `TogglePanel` |
+| 子菜单      | `SubPaint` / `SubProc` / `OpenSub`                       |
+| 主窗口过程    | `WndProc`                                                |
+| 入口       | `wWinMain`，含 `--read` / `--test-tray`                    |
+
+### 定时器
+
+只有三个，职责不重叠：
+
+| 定时器            | 归属窗口 | 周期        | 作用           |
+| -------------- | ---- | --------- | ------------ |
+| `WM_POLL`      | 主窗口  | 用户设定的刷新间隔 | 读取设备         |
+| `WM_TIP`       | 主窗口  | 1000 ms   | 刷新托盘悬停提示     |
+| `WM_PANELTICK` | 面板   | 500 ms    | 重绘面板 + 收起子菜单 |
+
+面板的 500 ms 定时器同时负责重绘和子菜单收合 ——  
+**面板打开时托盘提示仍由 `WM_TIP` 刷新，不要在这里重复刷新**，  
+否则两个定时器会叠加。
+
+---
+
+## 构建细节
+
+```bat
+cd src
+rc /nologo RapooBattery.rc
+cl /nologo /W3 /O2 /EHsc /std:c++17 /utf-8 RapooBattery.cpp RapooBattery.res ^
+   /Fe:RapooBattery.exe ^
+   /link setupapi.lib hid.lib user32.lib gdi32.lib shell32.lib advapi32.lib
+```
+
+### 必须先用 rc 编译资源
+
+`RapooBattery.rc` 只做一件事：
+
+```
+1 RT_MANIFEST "RapooBattery.manifest"
+```
+
+没有它，exe 不会嵌入管理员权限清单，程序会因 UIPI 而无法注册托盘图标。  
+直接 `cl` 而不先 `rc`，链接会报 `LNK1181: 无法打开 RapooBattery.res`。
+
+### 链接库
+
+| 库              | 用途                         |
+| -------------- | -------------------------- |
+| `setupapi.lib` | 枚举 HID 设备接口                |
+| `hid.lib`      | `HidD_*` / `HidP_*` 系列 API |
+| `user32.lib`   | 窗口、消息、托盘                   |
+| `gdi32.lib`    | 图标位图绘制                     |
+| `shell32.lib`  | `Shell_NotifyIcon`         |
+| `advapi32.lib` | 注册表                        |
+
+### 编译选项
+
+| 选项           | 原因                         |
+| ------------ | -------------------------- |
+| `/utf-8`     | 源码含中文注释与字符串，不加会按 GBK 解析而报错 |
+| `/std:c++17` | 使用了结构化绑定、聚合初始化等特性          |
+| `/O2`        | 图标每像素求值，需要优化               |
+
+`build.bat` 会自动定位 `vcvars64.bat`（依次尝试 VS 2022 / VS 18 / 2019  
+的 BuildTools 与 Community 等版本）。
+
+---
+
+## 重新生成字形数据
+
+托盘数字的 SVG 源文件在 `assets/svg/`（10 个数字 + 雷电 + 感叹号）。  
+它们取自 [wakudemo](https://wakudemo.cn/assets/24) 的图标包，  
+以 **CC0 1.0** 发布（公共领域奉献），可以自由使用和再分发。
+
+```bat
+python tools\svg2cpp.py
+```
+
+输出到 `src/glyphs_gen.h`，内容与仓库中已有的文件**逐字节一致**。
+
+脚本支持的 path 指令：`M m L l H h V v C c S s Q q T t A a Z z`，  
+用 de Casteljau / 圆弧参数化展平为折线。
+
+也可以指定路径：
+
+```bat
+python tools\svg2cpp.py --svg <SVG目录> --out <输出文件>
+```
+
+### 生成应用图标
+
+exe 的应用图标（资源管理器 / 任务栏 / Alt-Tab）由单个 SVG 生成：
+
+```bat
+python tools\svg2ico.py assets\svg\app-icon.svg src\app.ico
+```
+
+输出 ICO 含 16 / 24 / 32 / 48 / 64 / 256 六种尺寸，其中 256 以 PNG 压缩存放。  
+`RapooBattery.rc` 用 `1 ICON "app.ico"` 把它嵌进 exe  
+（第一个图标资源会被链接器自动用作主图标）。
+
+生成时有个坑：**必须按奇偶填充规则逐像素判断内外**。  
+若对每个子路径单独调用 `ImageDraw.polygon`，外轮廓会被整个填实，  
+电池内部的加号镂空就丢了 —— 第一版就踩了这个坑。
+
+### 预览图标效果
+
+改配色或描边粗细后，不需要编译 C++ 就能看效果：
+
+```bat
+python tools\render_icons.py
+```
+
+输出 `assets/sheet-dark.png` 与 `assets/sheet-light.png`  
+（同一组图标分别放在深色和浅色背景下）。
+
+> 这个脚本存在的原因：某个早期 C++ 预览工具的 BMP 写出函数把 alpha>   
+> 写死成 255，并把透明像素合成到固定深灰，因此它**无法展示浅色任务栏下的效果**。>   
+> Python 版直接输出真实 alpha。
+
+---
+
+## 已知限制的技术原因
+
+**托盘图标尺寸无法放大。**  
+Shell 通过 `Shell_NotifyIcon` 的 `NIM_SETVERSION` / `uVersion` 机制按 DPI  
+请求图标尺寸，应用无法指定更大值。100% 缩放对应 16×16，125% 对应 20×20，  
+150% 对应 24×24。程序已按实际像素渲染并做 8 倍超采样，这已是系统允许的上限。
+
+**不支持蓝牙鼠标。**  
+程序只走 HID 接收器路径（枚举 `FF00/000F` 厂商集合）。  
+蓝牙鼠标走的是另一套协议（通常是 HID over GATT），没有这个集合。
+
+**读不到休眠时的电量。**  
+原因见上文「必须区分空帧」。设备休眠时 HID 通道虽然还在，  
+但返回的是全零缓冲，无法从中得到可信数值。
+
+**只在 VT7 MAX MASTER V2 上验证过。**  
+`VID_24AE` 是雷柏的官方 VID，但不同型号的厂商集合布局和字节偏移  
+**可能完全不同**。移植方法见 [协议记录](PROTOCOL.md) 最后一节。

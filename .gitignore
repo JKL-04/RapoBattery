@@ -1,0 +1,26 @@
+# 构建产物（可执行文件通过 GitHub Releases 分发，不入库）
+*.obj
+*.res
+*.exe
+*.pdb
+*.ilk
+*.exp
+*.lib
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# 运行时生成
+RapooBattery.log
+
+# 生成的字形元数据（由 tools/svg2cpp.py 输出）
+assets/glyphs_meta.json
+
+# 编辑器 / 系统
+.vs/
+.vscode/
+*.user
+*.suo
+Thumbs.db
+desktop.ini

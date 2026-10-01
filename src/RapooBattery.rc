@@ -1,0 +1,11 @@
+#include <winuser.h>
+
+// 管理员权限清单：没有它，Shell_NotifyIcon 会被 UIPI 拦截，
+// 托盘图标注册返回 ERROR_ACCESS_DENIED(5)。
+1 RT_MANIFEST "RapooBattery.manifest"
+
+// 应用图标：资源管理器 / 任务栏 / Alt-Tab 显示。
+// 由 tools/svg2ico.py 从 assets/svg/app-icon.svg 生成，含 6 种尺寸
+// （16/24/32/48/64/256），其中 256 以 PNG 压缩存放。
+// 第一个图标资源会被链接器自动用作 exe 的主图标。
+1 ICON "app.ico"
