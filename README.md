@@ -4,7 +4,6 @@
 
 原生 Win32 / C++17，无 .NET 依赖，单文件 exe（260 KB），常驻内存约 2 MB。
 
-![托盘图标各电量配色](assets/sheet-dark.png)
 
 ## 为什么做这个
 
