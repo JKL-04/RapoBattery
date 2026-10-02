@@ -1,6 +1,6 @@
 @echo off
 REM ============================================================
-REM  RapooBattery - build script
+REM  RapoBattery - build script
 REM  Requires Visual Studio with the C++ toolchain and the Windows SDK.
 REM ============================================================
 setlocal
@@ -31,20 +31,20 @@ echo [1/4] regenerating the app icon from SVG ^(optional, skipped if Python/Pill
 python "..\tools\svg2ico.py" "..\assets\svg\app-icon.svg" "app.ico" >nul 2>&1
 if errorlevel 1 echo       ^(skipped - using the committed app.ico^)
 
-echo [2/4] compiling resources ^(embeds the admin manifest and the app icon^)
-rc /nologo RapooBattery.rc
+echo [2/4] compiling resources ^(embeds the manifest and the app icon^)
+rc /nologo RapoBattery.rc
 if errorlevel 1 goto fail
 
 echo [3/4] compiling source
-cl /nologo /W3 /O2 /EHsc /std:c++17 /utf-8 RapooBattery.cpp RapooBattery.res /Fe:RapooBattery.exe /link setupapi.lib hid.lib user32.lib gdi32.lib shell32.lib advapi32.lib
+cl /nologo /W3 /O2 /EHsc /std:c++17 /utf-8 RapoBattery.cpp RapoBattery.res /Fe:RapoBattery.exe /link setupapi.lib hid.lib user32.lib gdi32.lib shell32.lib advapi32.lib
 if errorlevel 1 goto fail
 
 echo [4/4] collecting output
-copy /y RapooBattery.exe ..\RapooBattery.exe >nul
-del /q *.obj *.res RapooBattery.exe 2>nul
+copy /y RapoBattery.exe ..\RapoBattery.exe >nul
+del /q *.obj *.res RapoBattery.exe 2>nul
 
 echo.
-echo Build OK: %~dp0RapooBattery.exe
+echo Build OK: %~dp0RapoBattery.exe
 exit /b 0
 
 :novc

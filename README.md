@@ -1,9 +1,8 @@
-# RapooBattery
+# RapoBattery
 
 在 Windows 系统托盘显示雷柏（Rapoo）无线鼠标的电量百分比。
 
 原生 Win32 / C++17，无 .NET 依赖，单文件 exe（260 KB），常驻内存约 2 MB。
-
 
 ## 为什么做这个
 
@@ -33,9 +32,7 @@ Windows 自带的电池面板不显示通过 2.4G 接收器连接的鼠标。
 
 ### 直接使用
 
-到 [**Releases**](https://github.com/JKL-04/RapoBattery/releases) 页面下载最新的 `RapooBattery.exe`，双击运行。
-
-程序需要管理员权限，UAC 提示里点「是」即可。
+到 [**Releases**](https://github.com/JKL-04/RapoBattery/releases) 页面下载最新的 `RapoBattery.exe`，双击运行。
 
 ### 从源码构建
 
@@ -49,23 +46,20 @@ build.bat
 
 ```bat
 cd src
-rc /nologo RapooBattery.rc
-cl /nologo /W3 /O2 /EHsc /std:c++17 /utf-8 RapooBattery.cpp RapooBattery.res ^
-   /Fe:RapooBattery.exe ^
+rc /nologo RapoBattery.rc
+cl /nologo /W3 /O2 /EHsc /std:c++17 /utf-8 RapoBattery.cpp RapoBattery.res ^
+   /Fe:RapoBattery.exe ^
    /link setupapi.lib hid.lib user32.lib gdi32.lib shell32.lib advapi32.lib
 ```
 
-> 必须先用 `rc` 编译资源文件。它的作用是把 `RapooBattery.manifest`  
-> 嵌进 exe —— 没有它程序会因权限不足而无法注册托盘图标。
+> 必须先用 `rc` 编译资源文件。它的作用是把 `RapoBattery.manifest`  
+> 嵌进 exe。
 
 ## 使用
 
-双击 `RapooBattery.exe`，托盘出现电量图标即完成。程序会记住你的刷新间隔设置。
+双击 `RapoBattery.exe`，托盘出现电量图标即完成。程序会记住你的刷新间隔设置。
 
-开机自启在浮窗里勾选 `开机自启`，会创建一个任务计划程序项  
-（以最高权限运行，登录时启动）。
-
-
+开机自启在浮窗里勾选 `开机自启` 即可。
 
 ## 项目结构
 
@@ -73,9 +67,9 @@ cl /nologo /W3 /O2 /EHsc /std:c++17 /utf-8 RapooBattery.cpp RapooBattery.res ^
 .
 ├── build.bat                 
 ├── src/
-│   ├── RapooBattery.cpp      
-│   ├── RapooBattery.manifest 
-│   ├── RapooBattery.rc       
+│   ├── RapoBattery.cpp      
+│   ├── RapoBattery.manifest 
+│   ├── RapoBattery.rc       
 │   ├── app.ico               
 │   └── glyphs_gen.h          
 ├── tools/
@@ -99,7 +93,7 @@ cl /nologo /W3 /O2 /EHsc /std:c++17 /utf-8 RapooBattery.cpp RapooBattery.res ^
 Copyright (C) 2026 JKL-04
 
 这意味着你可以自由使用、修改和分发本程序，**但衍生作品必须同样以 GPL-3.0 开源**。
-  
+
 详见 [GNU 官方说明](https://www.gnu.org/licenses/gpl-3.0.html)。
 
 ## 致谢

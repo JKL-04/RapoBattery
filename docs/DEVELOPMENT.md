@@ -94,25 +94,6 @@ case WM_TRAY:
 现象：**只有把鼠标移开托盘图标，时间戳才开始更新。**
 日志里能看到连续上百行 `WM_TRAY: event=0x0200`。
 
-### 1.7 UIPI：任务栏完整性级别高于本进程时托盘注册失败
-
-`Shell_NotifyIcon` 的实现是**向任务栏窗口发送消息**。
-若任务栏进程的完整性级别更高，用户界面特权隔离（UIPI）会拦截这些消息，
-`Shell_NotifyIcon` 返回 `ERROR_ACCESS_DENIED (5)`。
-
-诊断方式：写一个最小程序打印自身完整性级别与 `Shell_NotifyIcon` 的返回值
-（当时用两个一次性探针程序验证：一个打印自身完整性级别，
-一个测试 4 种托盘窗口/回调组合，源码未随仓库保留）。
-
-**解决方案**：清单声明 `requireAdministrator`，并显式放行托盘相关消息：
-
-```cpp
-ChangeWindowMessageFilterEx(hwnd, WM_COPYDATA, MSGFLT_ALLOW, nullptr);
-ChangeWindowMessageFilterEx(hwnd, 0x004A /* WM_COPYGLOBALDATA */, MSGFLT_ALLOW, nullptr);
-ChangeWindowMessageFilterEx(hwnd, RegisterWindowMessageW(L"TaskbarCreated"), MSGFLT_ALLOW, nullptr);
-// ...以及 WM_USER+1 .. WM_USER+5
-```
-
 ### 1.8 托盘图标尺寸由系统决定，无法放大
 
 Shell 按 DPI 请求图标尺寸：100% → 16×16，125% → 20×20，150% → 24×24。
@@ -300,7 +281,7 @@ io.open(path, "w", encoding="utf-8").write(s)
 | `assets/` | 源 SVG 与预览图 |
 | `docs/` | 协议记录与本文件 |
 
-协议逆向阶段还写过一批一次性探针程序（设备能力枚举、完整性级别检测、
+协议逆向阶段还写过一批一次性探针程序（设备能力枚举、
 托盘注册变体测试、图标渲染试验台、WebHID 对照实验）。
 它们没有随仓库保留 —— 结论都已整理进本文与 [协议记录](PROTOCOL.md)，
 正常构建也不需要它们。

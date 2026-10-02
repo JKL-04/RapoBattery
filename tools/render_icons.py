@@ -4,7 +4,7 @@
 
 用途：改配色 / 改描边粗细后，快速看出真实尺寸下的效果。
 
-管线与 src/RapooBattery.cpp 的 MakeIcon() 完全一致：
+管线与 src/RapoBattery.cpp 的 MakeIcon() 完全一致：
     glyphs_gen.h -> 多边形 -> 8 倍超采样有符号距离场 -> 盒式降采样
 
 之所以需要这个脚本：某个早期 C++ 预览工具的 BMP 写出函数把 alpha 写死成

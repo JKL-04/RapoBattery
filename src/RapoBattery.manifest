@@ -2,28 +2,14 @@
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
   <assemblyIdentity
       type="win32"
-      name="RapooBattery"
+      name="RapoBattery"
       version="1.1.0.0"
       processorArchitecture="*"/>
 
-  <!--
-    必须以管理员权限运行。
-
-    原因：本机任务栏 (explorer.exe) 运行在 High 完整性级别，而普通双击启动的
-    进程是 Medium 级别。Windows 的 UIPI（用户界面特权隔离）禁止低级别进程向
-    高级别进程发送窗口消息，而 Shell_NotifyIcon 正是通过向任务栏发消息来注册
-    托盘图标，因此会返回 ERROR_ACCESS_DENIED(5)，表现为「托盘图标不显示」。
-
-    实测证据：
-      trayvariants.exe  以管理员运行 (IL=High)  -> 4 种窗口组合全部注册成功
-      RapooBattery.exe  普通双击   (IL=Medium) -> NIM_ADD=0 err=5
-
-    加上此清单后，双击会自动弹出 UAC 请求提权，提权后托盘注册即正常。
-  -->
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>
       <requestedPrivileges>
-        <requestedExecutionLevel level="requireAdministrator" uiAccess="false"/>
+        <requestedExecutionLevel level="asInvoker" uiAccess="false"/>
       </requestedPrivileges>
     </security>
   </trustInfo>

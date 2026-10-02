@@ -12,7 +12,7 @@ __pycache__/
 *.pyc
 
 # 运行时生成
-RapooBattery.log
+RapoBattery.log
 
 # 生成的字形元数据（由 tools/svg2cpp.py 输出）
 assets/glyphs_meta.json

@@ -1,4 +1,4 @@
-// RapooBattery — 雷柏（Rapoo）无线鼠标电量托盘监视器
+// RapoBattery — 雷柏（Rapoo）无线鼠标电量托盘监视器
 // Copyright (C) 2026 JKL-04
 //
 // 本程序是自由软件：你可以依据 GNU 通用公共许可证（由自由软件基金会发布）
@@ -66,9 +66,9 @@
 // ══════════════════════════════════════════════════════════════════════
 // 四、构建
 // ══════════════════════════════════════════════════════════════════════
-//   rc /nologo RapooBattery.rc
-//   cl /nologo /W3 /O2 /EHsc /std:c++17 /utf-8 RapooBattery.cpp RapooBattery.res ^
-//      /Fe:RapooBattery.exe ^
+//   rc /nologo RapoBattery.rc
+//   cl /nologo /W3 /O2 /EHsc /std:c++17 /utf-8 RapoBattery.cpp RapoBattery.res ^
+//      /Fe:RapoBattery.exe ^
 //      /link setupapi.lib hid.lib user32.lib gdi32.lib shell32.lib advapi32.lib
 //
 //   命令行参数（用于排障）：
@@ -108,7 +108,7 @@
 #pragma comment(lib, "advapi32.lib")
 
 // ─────────────────────────── 常量 ───────────────────────────
-static const USHORT RAPOO_VID      = 0x24AE;   // 雷柏官方 VID
+static const USHORT RAPO_VID      = 0x24AE;   // 雷柏官方 VID
 static const BYTE   STATUS_FEATID  = 0x08;     // 状态 Feature report ID
 static const int    STATUS_BUFLEN  = 250;      // 声明长度只有 33，但有效数据到 141，必须多申请
 static const int    BATTERY_OFFSET = 88;       // 电量所在字节偏移
@@ -119,7 +119,7 @@ static const UINT WM_TIP         = WM_APP + 3;   // 刷新托盘提示的定时�
 static const UINT WM_PANELTICK   = WM_APP + 12;  // 面板唯一的定时器 id
 static const DWORD PANEL_TICK_MS = 500;          // 面板定时器周期
 
-static const wchar_t* PANEL_CLASS = L"RapooBatteryPanel";
+static const wchar_t* PANEL_CLASS = L"RapoBatteryPanel";
 static const int PANEL_W   = 286;
 static const int PANEL_GAP = 8;      // 浮窗与托盘图标之间的间距
 
@@ -141,8 +141,10 @@ static const int   POLL_DEFAULT_IDX   = 2;
 static const DWORD POLL_RETRY_MS      = 5 * 1000;  // 读取失败后 5 秒重试
 static const DWORD TIP_REFRESH_MS     = 1000;      // 托盘提示每秒刷新
 
-static const wchar_t* CFG_KEY   = L"Software\\RapooBattery";
-static const wchar_t* WND_CLASS = L"RapooBatteryTrayWnd";
+static const wchar_t* CFG_KEY   = L"Software\\RapoBattery";
+static const wchar_t* RUN_KEY   = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+
+static const wchar_t* WND_CLASS = L"RapoBatteryTrayWnd";
 
 // ─────────────────────────── 全局状态 ───────────────────────────
 struct DevicePaths {
@@ -193,9 +195,9 @@ static std::wstring GetExePath() {
     return buf;
 }
 
-// 诊断日志：写入 exe 同目录下的 RapooBattery.log。
+// 诊断日志：写入 exe 同目录下的 RapoBattery.log。
 // 默认开启（只记录启动、托盘注册、读取结果等关键事件），
-// 设环境变量 RAPOO_DEBUG=0 可关闭。
+// 设环境变量 RAPO_DEBUG=0 可关闭。
 //
 // ⚠ 切勿在窗口过程的高频消息（如 WM_MOUSEMOVE）里调用本函数：
 //   每次调用都要开关一次文件，鼠标在托盘图标上移动时每秒会产生大量
@@ -204,7 +206,7 @@ static bool DebugEnabled() {
     static int cached = -1;
     if (cached < 0) {
         wchar_t v[8] = {0};
-        DWORD n = GetEnvironmentVariableW(L"RAPOO_DEBUG", v, 8);
+        DWORD n = GetEnvironmentVariableW(L"RAPO_DEBUG", v, 8);
         cached = (n > 0 && v[0] == L'0') ? 0 : 1;   // 默认开启
     }
     return cached == 1;
@@ -215,7 +217,7 @@ static void Dbg(const wchar_t* fmt, ...) {
     std::wstring p = GetExePath();
     size_t s = p.find_last_of(L'\\');
     if (s != std::wstring::npos) p.resize(s + 1); else p.clear();
-    p += L"RapooBattery.log";
+    p += L"RapoBattery.log";
 
     wchar_t line[1024];
     va_list ap; va_start(ap, fmt);
@@ -256,62 +258,82 @@ static void SaveConfig() {
 static DWORD CurrentPollMs() { return POLL_CHOICES_SEC[g.pollIdx] * 1000; }
 
 // ─────────────────────────── 开机自启 ───────────────────────────
-// 本程序需要管理员权限（托盘注册受 UIPI 限制，见 RapooBattery.manifest），
-// 因此不能用 HKCU\...\Run 注册表方式 —— 那种方式登录时不会提权，托盘图标
-// 会注册失败。改用任务计划程序，并勾选「使用最高权限运行」(/RL HIGHEST)。
-static const wchar_t* TASK_NAME = L"RapooBattery";
+// 用注册表 HKCU\...\Run：实现简单，且「是否已开启」读一次就能确定。
+static const wchar_t* RUN_VALUE = L"RapoBattery";
 
-static void RunHidden(const std::wstring& cmdline) {
-    STARTUPINFOW si = {}; si.cb = sizeof(si);
-    PROCESS_INFORMATION pi = {};
-    std::vector<wchar_t> buf(cmdline.begin(), cmdline.end());
-    buf.push_back(0);
-    if (CreateProcessW(nullptr, buf.data(), nullptr, nullptr, FALSE,
-                       CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
-        WaitForSingleObject(pi.hProcess, 8000);
-        CloseHandle(pi.hProcess);
-        CloseHandle(pi.hThread);
-    }
+static bool IsAutoRunEnabled() {
+    HKEY k = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, RUN_KEY, 0, KEY_READ, &k) != ERROR_SUCCESS)
+        return false;
+    DWORD type = 0, cb = 0;
+    LONG r = RegQueryValueExW(k, RUN_VALUE, nullptr, &type, nullptr, &cb);
+    RegCloseKey(k);
+    return r == ERROR_SUCCESS && type == REG_SZ && cb > 0;
 }
 
-// 查询计划任务是否存在（退出码 0 表示存在）
-static bool TaskExists() {
-    std::wstring c = L"cmd.exe /c \"schtasks /Query /TN \"";
-    c += TASK_NAME;
-    c += L"\" >nul 2>&1\"";
+static bool SetAutoRun(bool enable) {
+    HKEY k = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, RUN_KEY, 0, nullptr, 0,
+                        KEY_SET_VALUE, nullptr, &k, nullptr) != ERROR_SUCCESS) {
+        Dbg(L"自启：无法打开 Run 键");
+        return false;
+    }
 
+    LONG r;
+    if (enable) {
+        // 路径带空格时必须加引号，否则系统无法正确解析命令行
+        std::wstring v = L"\"" + GetExePath() + L"\"";
+        r = RegSetValueExW(k, RUN_VALUE, 0, REG_SZ,
+                           reinterpret_cast<const BYTE*>(v.c_str()),
+                           (DWORD)((v.size() + 1) * sizeof(wchar_t)));
+        Dbg(L"自启：写入 Run 键 rc=%ld", r);
+    } else {
+        r = RegDeleteValueW(k, RUN_VALUE);
+        if (r == ERROR_FILE_NOT_FOUND) r = ERROR_SUCCESS;   // 本来就没有
+        Dbg(L"自启：删除 Run 键 rc=%ld", r);
+    }
+    RegCloseKey(k);
+    return r == ERROR_SUCCESS;
+}
+
+// 一次性清理：更早的版本用任务计划程序实现自启。
+// 若那个任务还在，删掉它 —— 否则登录时会被启动两次。
+// 只在 Run 键尚未启用时做这件事，避免误删正在使用中的任务。
+static void CleanUpLegacyScheduledTask() {
+    if (IsAutoRunEnabled()) return;
+
+    wchar_t sysdir[MAX_PATH] = {0};
+    GetSystemDirectoryW(sysdir, MAX_PATH);
     STARTUPINFOW si = {}; si.cb = sizeof(si);
-    PROCESS_INFORMATION pi = {};
-    std::vector<wchar_t> buf(c.begin(), c.end());
+    const wchar_t* nm = L"RapoBattery";
+
+    std::wstring cmd = L"\"" + std::wstring(sysdir) +
+                       L"\\schtasks.exe\" /Query /TN \"" + nm + L"\"";
+    std::vector<wchar_t> buf(cmd.begin(), cmd.end());
     buf.push_back(0);
+    PROCESS_INFORMATION pi = {};
     if (!CreateProcessW(nullptr, buf.data(), nullptr, nullptr, FALSE,
                         CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi))
-        return false;
+        return;                                   // 连 schtasks 都起不来就放弃
     WaitForSingleObject(pi.hProcess, 5000);
     DWORD code = 1;
     GetExitCodeProcess(pi.hProcess, &code);
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
-    return code == 0;
-}
+    if (code != 0) return;                        // 任务不存在，无需处理
 
-static bool IsAutoRunEnabled() { return TaskExists(); }
-
-static bool SetAutoRun(bool enable) {
-    if (!enable) {
-        std::wstring c = L"cmd.exe /c \"schtasks /Delete /TN \"";
-        c += TASK_NAME;
-        c += L"\" /F >nul 2>&1\"";
-        RunHidden(c);
-        return !TaskExists();
+    std::wstring del = L"\"" + std::wstring(sysdir) +
+                       L"\\schtasks.exe\" /Delete /TN \"" + nm + L"\" /F";
+    std::vector<wchar_t> buf2(del.begin(), del.end());
+    buf2.push_back(0);
+    PROCESS_INFORMATION pi2 = {};
+    if (CreateProcessW(nullptr, buf2.data(), nullptr, nullptr, FALSE,
+                       CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi2)) {
+        WaitForSingleObject(pi2.hProcess, 5000);
+        CloseHandle(pi2.hProcess);
+        CloseHandle(pi2.hThread);
+        Dbg(L"自启：已清理遗留的任务计划程序条目");
     }
-    std::wstring c = L"cmd.exe /c \"schtasks /Create /TN \"";
-    c += TASK_NAME;
-    c += L"\" /TR \"\\\"";
-    c += GetExePath();
-    c += L"\\\"\" /SC ONLOGON /RL HIGHEST /F >nul 2>&1\"";
-    RunHidden(c);
-    return TaskExists();
 }
 
 // ─────────────────────────── HID 设备发现 ───────────────────────────
@@ -321,8 +343,8 @@ static bool OpenHidPath(const std::wstring& path, DWORD access, HANDLE* out) {
     return *out != INVALID_HANDLE_VALUE;
 }
 
-// 枚举所有 Rapoo HID 集合，找到承载电量数据的那个（FF00/000F）
-static bool FindRapooCollections(DevicePaths* out) {
+// 枚举所有 Rapo HID 集合，找到承载电量数据的那个（FF00/000F）
+static bool FindRapoCollections(DevicePaths* out) {
     out->valid = false;
     out->info.clear();
 
@@ -346,7 +368,7 @@ static bool FindRapooCollections(DevicePaths* out) {
         if (!OpenHidPath(path, 0, &h)) continue;   // 查询属性用零权限句柄即可
 
         HIDD_ATTRIBUTES attr; attr.Size = sizeof(attr);
-        if (!HidD_GetAttributes(h, &attr) || attr.VendorID != RAPOO_VID) {
+        if (!HidD_GetAttributes(h, &attr) || attr.VendorID != RAPO_VID) {
             CloseHandle(h);
             continue;
         }
@@ -427,26 +449,6 @@ static bool ReadBattery(int* battery, std::wstring* log) {
     }
     *battery = bat;
     return true;
-}
-
-// ─────────────────────────── UIPI 消息放行 ───────────────────────────
-// Shell_NotifyIcon 通过向任务栏窗口发送消息来实现。若任务栏进程的完整性级别
-// 高于本进程，用户界面特权隔离 (UIPI) 会拦截这些消息，导致注册返回
-// ERROR_ACCESS_DENIED(5)。显式放行已知的托盘相关消息可解决此问题。
-// ChangeWindowMessageFilterEx 对自身进程拥有的窗口始终允许调用。
-static void AllowTrayMessages(HWND hwnd) {
-    if (!hwnd) return;
-    const UINT msgs[] = {
-        WM_COPYDATA,                              // Shell_NotifyIcon 的主要载体
-        WM_USER + 1, WM_USER + 2, WM_USER + 3,
-        WM_USER + 4, WM_USER + 5,
-        0x004A,                                   // WM_COPYGLOBALDATA
-        RegisterWindowMessageW(L"TaskbarCreated"),
-    };
-    for (UINT m : msgs) {
-        if (!m) continue;
-        ChangeWindowMessageFilterEx(hwnd, m, MSGFLT_ALLOW, nullptr);
-    }
 }
 
 // ─────────────────────────── 托盘图标绘制 ───────────────────────────
@@ -792,7 +794,7 @@ static void DoPoll() {
 
     // 句柄未就绪（首次启动或曾读取失败）时重新枚举设备
     if (g.hInfo == INVALID_HANDLE_VALUE) {
-        if (!FindRapooCollections(&g.dev) ||
+        if (!FindRapoCollections(&g.dev) ||
             !OpenHidPath(g.dev.info, GENERIC_READ | GENERIC_WRITE, &g.hInfo)) {
             g.hInfo = INVALID_HANDLE_VALUE;
             g.haveBattery = false;
@@ -1033,7 +1035,7 @@ static void PaintPanel(HWND hwnd) {
 }
 
 // ─────────────── 子菜单：刷新间隔 ───────────────
-static const char* SUB_CLASS = "RapooBatterySub";
+static const char* SUB_CLASS = "RapoBatterySub";
 
 static int SubHeight() { return PAD_TOP + POLL_CHOICE_COUNT * ROW_H + PAD_BOT; }
 
@@ -1166,7 +1168,7 @@ static void OpenSub() {
     }
 
     g_sub = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
-                            L"RapooBatterySub", L"sub",
+                            L"RapoBatterySub", L"sub",
                             WS_POPUP, x, y, w, h,
                             nullptr, nullptr, g.hInst, nullptr);
     if (!g_sub) return;
@@ -1378,7 +1380,7 @@ static void TogglePanel() {
     }
 
     g_panel = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
-                              PANEL_CLASS, L"RapooBatteryPanel",
+                              PANEL_CLASS, L"RapoBatteryPanel",
                               WS_POPUP, x, y, PANEL_W, H,
                               nullptr, nullptr, g.hInst, nullptr);
     if (!g_panel) return;
@@ -1458,15 +1460,15 @@ static int RunTraySelfTest(HINSTANCE hInst) {
     wc.cbSize        = sizeof(wc);
     wc.lpfnWndProc   = DefWindowProcW;
     wc.hInstance     = hInst;
-    wc.lpszClassName = L"RapooBatterySelfTest";
+    wc.lpszClassName = L"RapoBatterySelfTest";
     ATOM atom = RegisterClassExW(&wc);
     printf("1. RegisterClassExW         : atom=%u err=%lu\n", atom, GetLastError());
 
-    HWND hwnd = CreateWindowExW(0, L"RapooBatterySelfTest", L"selftest", 0,
+    HWND hwnd = CreateWindowExW(0, L"RapoBatterySelfTest", L"selftest", 0,
                                 0, 0, 0, 0, HWND_MESSAGE, nullptr, hInst, nullptr);
     printf("2. CreateWindow(HWND_MESSAGE): hwnd=%p err=%lu\n", hwnd, GetLastError());
     if (!hwnd) {
-        hwnd = CreateWindowExW(0, L"RapooBatterySelfTest", L"selftest", 0,
+        hwnd = CreateWindowExW(0, L"RapoBatterySelfTest", L"selftest", 0,
                                0, 0, 0, 0, nullptr, nullptr, hInst, nullptr);
         printf("   fallback normal window   : hwnd=%p err=%lu\n", hwnd, GetLastError());
     }
@@ -1482,10 +1484,9 @@ static int RunTraySelfTest(HINSTANCE hInst) {
     nid.uCallbackMessage = WM_TRAY;
     nid.uFlags           = NIF_ICON | NIF_TIP | NIF_MESSAGE;
     nid.hIcon            = icon;
-    wcscpy_s(nid.szTip, L"RapooBattery self test");
+    wcscpy_s(nid.szTip, L"RapoBattery self test");
     printf("4. cbSize=%u / sizeof=%u\n", nid.cbSize, (unsigned)sizeof(NOTIFYICONDATAW));
 
-    AllowTrayMessages(hwnd);
     SetLastError(0);
     BOOL added = Shell_NotifyIconW(NIM_ADD, &nid);
     DWORD addErr = GetLastError();
@@ -1520,7 +1521,7 @@ static int RunReadTest(LPWSTR lpCmdLine) {
     if (p) { int v = _wtoi(p + 6); if (v > 0) times = v; }
 
     DevicePaths dp;
-    if (!FindRapooCollections(&dp)) {
+    if (!FindRapoCollections(&dp)) {
         printf("未找到雷柏设备集合（请确认接收器已插好、鼠标已开机）\n");
         return 3;
     }
@@ -1556,29 +1557,17 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR lpCmdLine, int) {
     Dbg(L"=== 启动 ===");
     g.hInst = hInst;
 
-    // 按系统 DPI 计算托盘图标实际像素尺寸：100% -> 16px，125% -> 20px，150% -> 24px
-    {
-        HDC hdc = GetDC(nullptr);
-        int dpi = hdc ? GetDeviceCaps(hdc, LOGPIXELSX) : 96;
-        if (hdc) ReleaseDC(nullptr, hdc);
-        if (dpi <= 0) dpi = 96;
-        int px = MulDiv(16, dpi, 96);
-        if (px < 12) px = 12;
-        if (px > 64) px = 64;
-        g_iconPx  = px;
-        g_iconDim = px * ICON_SS;
-        Dbg(L"DPI=%d -> 图标 %dx%d 像素", dpi, px, px);
-    }
-
     LoadConfig();
     Dbg(L"刷新间隔索引=%d -> %lu ms", g.pollIdx, CurrentPollMs());
+
+    CleanUpLegacyScheduledTask();
 
     // 单实例互斥。
     // ⚠ GetLastError() 必须在任何其他函数调用之前读取 —— Dbg() 内部会写文件、
     //   取时间、格式化字符串，这些调用会覆盖线程的 last-error 值，
     //   早期版本因此把「首次启动」误判成「已有实例在运行」。
     SetLastError(0);
-    HANDLE mutex = CreateMutexW(nullptr, FALSE, L"RapooBattery_SingleInstance");
+    HANDLE mutex = CreateMutexW(nullptr, FALSE, L"RapoBattery_SingleInstance");
     DWORD mutexErr = GetLastError();
     if (mutex && mutexErr == ERROR_ALREADY_EXISTS) {
         Dbg(L"已有实例在运行，退出");
@@ -1595,11 +1584,11 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR lpCmdLine, int) {
     wc.lpszClassName = WND_CLASS;
     if (!RegisterClassExW(&wc)) return 1;
 
-    g.hwnd = CreateWindowExW(0, WND_CLASS, L"RapooBattery", 0, 0, 0, 0, 0,
+    g.hwnd = CreateWindowExW(0, WND_CLASS, L"RapoBattery", 0, 0, 0, 0, 0,
                              HWND_MESSAGE, nullptr, hInst, nullptr);
     if (!g.hwnd) {
         // 某些受限环境不支持 message-only 窗口，退回普通隐藏窗口
-        g.hwnd = CreateWindowExW(0, WND_CLASS, L"RapooBattery", 0, 0, 0, 0, 0,
+        g.hwnd = CreateWindowExW(0, WND_CLASS, L"RapoBattery", 0, 0, 0, 0, 0,
                                  nullptr, nullptr, hInst, nullptr);
     }
     if (!g.hwnd) { Dbg(L"无法创建窗口，退出"); return 2; }
@@ -1611,17 +1600,14 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR lpCmdLine, int) {
     g.nid.uFlags           = NIF_ICON | NIF_TIP | NIF_MESSAGE;
     g.hIcon                = MakeIcon(-1);
     g.nid.hIcon            = g.hIcon;
-    wcscpy_s(g.nid.szTip, L"RapooBattery");
+    wcscpy_s(g.nid.szTip, L"RapoBattery");
 
-    AllowTrayMessages(g.hwnd);
     SetLastError(0);
     BOOL added = Shell_NotifyIconW(NIM_ADD, &g.nid);
     DWORD addErr = GetLastError();
     Dbg(L"Shell_NotifyIcon(NIM_ADD): %d err=%lu", added, addErr);
     if (!added) {
-        // 托盘注册被拒通常是权限问题（任务栏完整性级别高于本进程）。
-        // RapooBattery.manifest 已声明 requireAdministrator，正常双击即可提权。
-        Dbg(L"托盘注册失败 —— 请以管理员身份运行");
+        Dbg(L"托盘注册失败 err=%lu", addErr);
     }
 
     DoPoll();   // 首次读取，并按当前间隔起表
