@@ -12,68 +12,20 @@
 //
 // ══════════════════════════════════════════════════════════════════════
 //
+// 在系统托盘显示雷柏（Rapoo）无线鼠标的电量百分比。
+// 原生 Win32，无 .NET 依赖，单文件 exe。
 //
-// 单一功能：在系统托盘显示雷柏无线鼠标的电量百分比。
-// 原生 Win32，无 .NET 依赖，单文件 exe，常驻内存约 2 MB。
-//
-// ══════════════════════════════════════════════════════════════════════
-// 一、读取方式（本机实测确认，非推测）
-// ══════════════════════════════════════════════════════════════════════
-//   打开厂商集合  usagePage = 0xFF00, usage = 0x000F   (col06)
-//   读取 Feature report ID = 8，缓冲 250 字节
-//   电量百分比 = 返回数据 byte[88]   (取值 0..100)
-//
-//   本工具是【纯只读】的，绝不向设备写入任何数据。
-//
-//   曾经的做法是先向 col05 的 output report 6 发送一帧
-//   A5 A3 00 00 00 00 00 00 作为“握手”，但实测证明：
-//     • 该帧并非必需 —— 完全不写设备也能稳定读到电量（5/5 成功）
-//     • 每 30 秒重复发送该帧会反复打断鼠标与接收器之间的 2.4G 链路，
-//       表现为鼠标失灵、断连重连
-//   因此该帧已被彻底移除。同时句柄在启动时打开一次并保持复用，
-//   避免反复 CreateFile/CloseHandle 造成链路扰动。
-//
-//   实测校验（官方网页驱动显示值 vs byte[88]）：
-//     87% -> 0x57 = 87      93% -> 0x5D = 93
-//     94%(充电中) -> 0x5C = 92      92% -> 0x5C = 92
-//   同批次其他字节（byte[75] 恒定 94、byte[98]/[113] 为遥测）均已排除。
-//
-//   ⚠ 设备在唤醒间隙会返回整块全零的缓冲，其首字节也不是正常的 0x01。
-//     必须据此区分「真实的 0%」与「空帧」，否则会把空帧当成 0% 显示。
-//
-// ══════════════════════════════════════════════════════════════════════
-// 二、托盘图标
-// ══════════════════════════════════════════════════════════════════════
-//   未知    : 灰色 “--”
-//   高电量  : 绿色（> 60%）
-//   中等    : 白色
-//   低电量  : 红色（≤ 20%）
-//
-//   图标由 Shell 按 DPI 请求尺寸：100% 缩放为 16x16，125% 为 20x20，
-//   150% 为 24x24。因此按实际像素渲染，内部再用 8 倍超采样消除锯齿，
-//   而不是渲染固定尺寸后交给系统缩小（那会白白损失分辨率）。
-//
-// ══════════════════════════════════════════════════════════════════════
-// 三、浮窗面板
-// ══════════════════════════════════════════════════════════════════════
-//   左右键点击托盘图标都会切换浮窗；浮窗紧贴托盘图标上方，圆角白底。
-//   面板行：电量/上次读取时间、刷新间隔（悬停或点击弹出右侧子菜单）、
-//           立即刷新、开机自启、退出。
-//   关闭方式：再点一次托盘图标、按 Esc、或点击面板以外的任意位置。
-//   点击面板外部靠 WH_MOUSE_LL 钩子判断 —— 不能用 SetCapture，
-//   那会抢走全部鼠标消息，导致浮窗上的时间戳不再刷新。
-//
-// ══════════════════════════════════════════════════════════════════════
-// 四、构建
-// ══════════════════════════════════════════════════════════════════════
+// 构建：
 //   rc /nologo RapoBattery.rc
 //   cl /nologo /W3 /O2 /EHsc /std:c++17 /utf-8 RapoBattery.cpp RapoBattery.res ^
 //      /Fe:RapoBattery.exe ^
 //      /link setupapi.lib hid.lib user32.lib gdi32.lib shell32.lib advapi32.lib
 //
-//   命令行参数（用于排障）：
-//     --read [次数]   只读取并打印电量，不创建窗口/托盘
-//     --test-tray     逐步执行托盘注册并打印每步结果
+// 命令行参数：
+//   --read [次数]   只读取并打印电量，不创建窗口/托盘
+//   --test-tray     逐步执行托盘注册并打印每步结果
+//
+// 协议、构建细节与开发记录见 docs/ 与 STATUS.md。
 
 #define WIN32_LEAN_AND_MEAN
 #define UNICODE
@@ -91,8 +43,7 @@
 #include <string>
 #include <vector>
 
-// GET_X_LPARAM / GET_Y_LPARAM 通常来自 windowsx.h，但 WIN32_LEAN_AND_MEAN
-// 会把它屏蔽掉，这里自行定义（含符号扩展，与系统宏语义一致）。
+// GET_X_LPARAM / GET_Y_LPARAM 通常来自 windowsx.h，WIN32_LEAN_AND_MEAN 会屏蔽它。
 #ifndef GET_X_LPARAM
 #define GET_X_LPARAM(lp) ((int)(short)LOWORD(lp))
 #endif
@@ -132,14 +83,13 @@ static const UINT IDM_EXIT       = 1003;
 static const UINT IDM_POLL_BASE  = 1100;  // 1100..1104 对应 POLL_CHOICES_MS
 static const UINT IDM_IVL_OPEN   = 1109;  // 打开「刷新间隔」子菜单
 
-// 可选刷新间隔（秒）。默认 30 秒（索引 2）。
-// 说明：电量读取是纯只读操作，不会干扰鼠标，所以间隔可以设得比较短；
-// 但也没必要过密 —— 电量变化本身很慢（92% 往往停留 20 分钟才掉 1%）。
+// 可选刷新间隔（秒），索引与 PollIdx 对应。
 static const DWORD POLL_CHOICES_SEC[] = { 5, 10, 30, 60, 300 };
 static const int   POLL_CHOICE_COUNT  = 5;
 static const int   POLL_DEFAULT_IDX   = 2;
 static const DWORD POLL_RETRY_MS      = 5 * 1000;  // 读取失败后 5 秒重试
 static const DWORD TIP_REFRESH_MS     = 1000;      // 托盘提示每秒刷新
+static const int   TRAY_HEALTH_TICKS  = 30;        // 每 30 次提示刷新做一次图标健康检查
 
 static const wchar_t* CFG_KEY   = L"Software\\RapoBattery";
 static const wchar_t* RUN_KEY   = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
@@ -171,15 +121,12 @@ static State g;
 // ─────────────────────────── 小工具 ───────────────────────────
 static ULONGLONG NowMs() { return GetTickCount64(); }
 
-// 上次成功读取的绝对时刻，形如 "01:23:45"。
-// 早期版本显示的是相对秒数「更新于 N 秒前」，但托盘提示与浮窗面板是两个
-// 独立的定时器，采样时刻略有差异，整数除法会让两者稳定相差 1 秒。
-// 改成绝对时间戳后两者必然一致，而且信息量更高。
+// 上次成功读取的时刻，格式化为 "01:23:45"；尚未读取过则输出 "--:--:--"。
 static void FormatReadTime(wchar_t* out, size_t cch) {
     if (!g.lastGoodTick) { wcsncpy_s(out, cch, L"--:--:--", _TRUNCATE); return; }
     ULONGLONG ms = NowMs() - g.lastGoodTick;
     SYSTEMTIME st; GetLocalTime(&st);
-    // 从「现在」回退到读取时刻（用 FILETIME 做减法，自动处理分/时进位）
+    // 用 FILETIME 回退，自动处理分/时进位
     FILETIME ft; SystemTimeToFileTime(&st, &ft);
     ULARGE_INTEGER u; u.LowPart = ft.dwLowDateTime; u.HighPart = ft.dwHighDateTime;
     ULONGLONG ticks = ms * 10000ULL;          // 1 ms = 10000 个 100ns
@@ -195,13 +142,7 @@ static std::wstring GetExePath() {
     return buf;
 }
 
-// 诊断日志：写入 exe 同目录下的 RapoBattery.log。
-// 默认开启（只记录启动、托盘注册、读取结果等关键事件），
-// 设环境变量 RAPO_DEBUG=0 可关闭。
-//
-// ⚠ 切勿在窗口过程的高频消息（如 WM_MOUSEMOVE）里调用本函数：
-//   每次调用都要开关一次文件，鼠标在托盘图标上移动时每秒会产生大量
-//   WM_MOUSEMOVE，同步文件 I/O 会把消息循环堵死，导致定时器得不到执行。
+// 诊断日志：写 exe 同目录的 RapoBattery.log；RAPO_DEBUG=0 关闭。不要在窗口过程里调用。
 static bool DebugEnabled() {
     static int cached = -1;
     if (cached < 0) {
@@ -258,7 +199,7 @@ static void SaveConfig() {
 static DWORD CurrentPollMs() { return POLL_CHOICES_SEC[g.pollIdx] * 1000; }
 
 // ─────────────────────────── 开机自启 ───────────────────────────
-// 用注册表 HKCU\...\Run：实现简单，且「是否已开启」读一次就能确定。
+// 开机自启：读写 HKCU\...\Run 键。
 static const wchar_t* RUN_VALUE = L"RapoBattery";
 
 static bool IsAutoRunEnabled() {
@@ -296,9 +237,7 @@ static bool SetAutoRun(bool enable) {
     return r == ERROR_SUCCESS;
 }
 
-// 一次性清理：更早的版本用任务计划程序实现自启。
-// 若那个任务还在，删掉它 —— 否则登录时会被启动两次。
-// 只在 Run 键尚未启用时做这件事，避免误删正在使用中的任务。
+// 清理旧版本遗留的任务计划程序条目（仅在 Run 键未启用时执行）。
 static void CleanUpLegacyScheduledTask() {
     if (IsAutoRunEnabled()) return;
 
@@ -395,7 +334,7 @@ static bool FindRapoCollections(DevicePaths* out) {
 
 // ─────────────────────────── 读取电量（纯只读） ───────────────────────────
 // 只读 col06 的 Feature report ID 8，不向设备写入任何数据。
-// 句柄保持在 g.hInfo 复用，避免反复开关句柄扰动 2.4G 链路。
+// 句柄复用 g.hInfo，在启动时打开一次。
 static bool ReadBattery(int* battery, std::wstring* log) {
     if (g.hInfo == INVALID_HANDLE_VALUE) {
         if (log) *log += L"  信息句柄未打开\n";
@@ -405,8 +344,7 @@ static bool ReadBattery(int* battery, std::wstring* log) {
     std::vector<BYTE> buf(STATUS_BUFLEN, 0);
     buf[0] = STATUS_FEATID;
 
-    // 冗余读取：单次失败往往只是设备恰好处于休眠唤醒间隙，
-    // 重试一次可显著减少误报（重试同样只读，无副作用）。
+    // 失败时重试一次（单次失败多因设备处于休眠唤醒间隙）。
     BOOL ok = FALSE;
     for (int attempt = 0; attempt < 2 && !ok; ++attempt) {
         std::fill(buf.begin(), buf.end(), 0);
@@ -427,14 +365,12 @@ static bool ReadBattery(int* battery, std::wstring* log) {
         return false;
     }
 
-    // 电量合法性校验。
-    // 0% 理论上合法，但实测发现设备在唤醒间隙会返回整块全零的缓冲，
-    // 且首字节也不是正常的 0x01。用「首字节 + 内容非零」区分真 0% 与空帧。
+    // 校验 byte[88]；载荷全零视为空帧（首字节与正常帧相同，故只看载荷）。
     int bat = buf[BATTERY_OFFSET];
     if (bat == 0) {
         bool payloadAllZero = true;
         for (size_t k = 1; k < buf.size(); ++k) if (buf[k]) { payloadAllZero = false; break; }
-        if (payloadAllZero || buf[0] != 0x01) {
+        if (payloadAllZero) {
             if (log) *log += L"  空帧（全零缓冲），已丢弃\n";
             return false;
         }
@@ -454,17 +390,39 @@ static bool ReadBattery(int* battery, std::wstring* log) {
 // ─────────────────────────── 托盘图标绘制 ───────────────────────────
 // 逐像素渲染，直接写 BGRA 值，背景完全透明。
 //
-// 字形来源：游戏图标包 v1.4 的 SVG（24x24 viewBox，纯填充路径），
-// 由 tools/svg2cpp.py 解析并展平成多边形，写入 glyphs_gen.h。
-// 相比 GDI 文本渲染的好处：
-//   • 没有 ClearType 在 Alpha DIB 上产生的黑边
-//   • 精确还原原始字形设计，缩放不失真
-//   • 任意尺寸都清晰（当前用 8 倍超采样后再缩小，边缘平滑）
-//
-// 布局：电量数字居中铺满，黑色描边保证在浅色任务栏上也清晰。
-static int  g_iconPx  = 16;          // 目标像素尺寸（按 DPI 计算）
+// 字形来自 assets/svg 的 SVG，由 tools/svg2cpp.py 展平成多边形写入 glyphs_gen.h。
+static int  g_iconPx  = 16;          // 目标像素尺寸，由 LayoutIcon() 按 DPI 计算
 static int  g_iconDim = 16 * 8;      // 超采样画布边长
 static const int ICON_SS = 8;        // 超采样倍数
+
+// 按当前 DPI 计算图标尺寸
+static void LayoutIcon(HWND hwnd) {
+    int px = 16;
+
+    // 动态获取，避免依赖 Win10 1607+ 的导入表
+    HMODULE user32mod = GetModuleHandleW(L"user32.dll");
+    typedef UINT (WINAPI *PFN_GetDpiForWindow)(HWND);
+    typedef UINT (WINAPI *PFN_GetDpiForSystem)(void);
+    PFN_GetDpiForWindow pfnWin = user32mod
+        ? (PFN_GetDpiForWindow)GetProcAddress(user32mod, "GetDpiForWindow") : nullptr;
+    PFN_GetDpiForSystem pfnSys = user32mod
+        ? (PFN_GetDpiForSystem)GetProcAddress(user32mod, "GetDpiForSystem") : nullptr;
+
+    UINT dpi = 0;
+    // 依次尝试；全部失败则用 96
+    if (pfnWin && hwnd) dpi = pfnWin(hwnd);
+    if (!dpi && pfnSys) dpi = pfnSys();
+    if (!dpi) {
+        HDC hdc = GetDC(hwnd);
+        if (hdc) { dpi = (UINT)GetDeviceCaps(hdc, LOGPIXELSX); ReleaseDC(hwnd, hdc); }
+    }
+
+    if (dpi >= 72) px = (int)((16u * dpi + 48u) / 96u);   // 96->16, 120->20, 144->24
+    if (px < 8)  px = 8;
+    if (px > 64) px = 64;                 // 上限兜底，避免异常 DPI 撑爆画布
+    g_iconPx  = px;
+    g_iconDim = px * ICON_SS;
+}
 
 struct Canvas { DWORD* px; int w, h; };
 
@@ -501,7 +459,7 @@ struct PolyCache {
 
     ~PolyCache() { free(fx); free(fy); free(start); free(cnt); }
 
-    // 把字形轮廓映射到目标矩形（一次求值，供逐像素扫描复用）
+    // 把字形轮廓映射到目标矩形
     bool Build(const Glyph& g, float x0, float y0, float w, float h) {
         float bw = g.maxX - g.minX, bh = g.maxY - g.minY;
         if (bw <= 0 || bh <= 0 || w <= 0 || h <= 0) return false;
@@ -558,9 +516,7 @@ struct PolyCache {
     }
 };
 
-// 带描边的字形：一次轮廓求值同时得到内外与距离，
-// 内部填填充色，外侧按距离淡出写入描边色。
-// 早期实现是按 9 个偏移各完整重绘一遍，慢 9 倍，已优化掉。
+// 带描边的字形：一次轮廓求值同时得到内外与到边界的距离。
 static void FillGlyphOutline(Canvas& c, const Glyph& g, float x0, float y0,
                              float w, float h, COLORREF fill, COLORREF stroke,
                              float strokePx) {
@@ -575,11 +531,7 @@ static void FillGlyphOutline(Canvas& c, const Glyph& g, float x0, float y0,
             bool inside; float minD;
             pc.Sample(px + 0.5f, py + 0.5f, &inside, &minD);
 
-            // 有符号距离覆盖率。
-            // 早期写成 inside ? Clamp01f(0.5f - minD) + 0.5f : ...，
-            // 但 Clamp01f 会先把 (0.5 - minD) 压到 0，于是任何离边界超过
-            // 半个像素的内部像素覆盖率都恰好是 0.5 —— 整块字形恒为半透明
-            // （alpha≈128），看起来灰蒙蒙的。这是托盘数字对比度低的真正原因。
+            // 有符号距离覆盖率：边界处为 0.5，内部离边界超过 0.5px 即完全不透明
             float cov = inside ? Clamp01f(0.5f + minD) : Clamp01f(0.5f - minD);
             if (cov <= 0.0f) continue;
 
@@ -613,10 +565,16 @@ static void FillRoundBar(Canvas& c, float ax, float ay, float bx, float by,
 }
 
 static HICON MakeIcon(int battery) {
+    // 按当前 DPI 重算尺寸
+    LayoutIcon(g.hwnd);
+    const int   px  = g_iconPx;      // 本次渲染固定，避免中途被改
+    const int   dim = g_iconDim;
+    const float U   = (float)dim / (float)px;
+
     BITMAPV5HEADER bi = {};
     bi.bV5Size        = sizeof(bi);
-    bi.bV5Width       = g_iconPx;
-    bi.bV5Height      = -g_iconPx;          // 负高度 = 自上而下
+    bi.bV5Width       = px;
+    bi.bV5Height      = -px;                // 负高度 = 自上而下
     bi.bV5Planes      = 1;
     bi.bV5BitCount    = 32;
     bi.bV5Compression = BI_BITFIELDS;
@@ -632,12 +590,11 @@ static HICON MakeIcon(int battery) {
     ReleaseDC(nullptr, hdc);
     if (!hbm || !bits) { if (hbm) DeleteObject(hbm); return nullptr; }
 
-    DWORD* big = (DWORD*)malloc((size_t)g_iconDim * g_iconDim * sizeof(DWORD));
+    DWORD* big = (DWORD*)malloc((size_t)dim * dim * sizeof(DWORD));
     if (!big) { DeleteObject(hbm); return nullptr; }
-    memset(big, 0, (size_t)g_iconDim * g_iconDim * sizeof(DWORD));
+    memset(big, 0, (size_t)dim * dim * sizeof(DWORD));
 
-    Canvas cv; cv.px = big; cv.w = g_iconDim; cv.h = g_iconDim;
-    const float U = (float)g_iconDim / g_iconPx;
+    Canvas cv; cv.px = big; cv.w = dim; cv.h = dim;
 
     // 只有红绿两档：低于 20% 红，其余绿（未知状态用灰色）
     COLORREF digitCol;
@@ -651,7 +608,7 @@ static HICON MakeIcon(int battery) {
 
     // 数字尽量铺满图标，靠黑色描边在浅色任务栏上保持可读
     const float marginX = 0.2f * U;
-    const float availW  = (float)g_iconDim - marginX * 2.0f;
+    const float availW  = (float)dim - marginX * 2.0f;
 
     // 等宽排版：取最宽数字的宽高比作为统一字宽，数字等宽才整齐
     float uniAR = 0.72f;
@@ -662,14 +619,12 @@ static HICON MakeIcon(int battery) {
         if (gh > 0) { float ar = gw / gh; if (ar > uniAR) uniAR = ar; }
     }
 
-    // 字高基准固定为 2 位数，否则位数越少数字越大
-    // （早期版本「7」曾是「92」的 1.6 倍，因为字高随可用宽度浮动）。
-    // 1~2 位共用同一字号；3 位才按宽度等比缩小，绝不越界。
+    // 字高基准固定为 2 位数：位数不同也共用同一字号，3 位才按宽度缩小
     const float gapRatio = 0.04f;
     const int   baseDigits = 2;
-    float glyphH = (float)g_iconDim - 1.0f * U;
+    float glyphH = (float)dim - 1.0f * U;
     {
-        float baseH = (float)g_iconDim - 1.0f * U;
+        float baseH = (float)dim - 1.0f * U;
         float baseNeed = baseH * (uniAR * (float)baseDigits + gapRatio * (baseDigits - 1));
         if (baseNeed > availW)
             baseH = availW / (uniAR * (float)baseDigits + gapRatio * (baseDigits - 1));
@@ -681,9 +636,9 @@ static HICON MakeIcon(int battery) {
     float glyphW = glyphH * uniAR;
     float gapW   = glyphH * gapRatio;
     float totalW = glyphW * (float)n + gapW * (n - 1);
-    float ox = ((float)g_iconDim - totalW) * 0.5f;
+    float ox = ((float)dim - totalW) * 0.5f;
     if (ox < marginX) ox = marginX;
-    const float oy = ((float)g_iconDim - glyphH) * 0.5f;
+    const float oy = ((float)dim - glyphH) * 0.5f;
 
     for (int i = 0; i < n; ++i) {
         if (text[i] == '-') {
@@ -712,11 +667,11 @@ static HICON MakeIcon(int battery) {
 
     // 超采样画布 -> 目标尺寸（盒式平均，保留透明度）
     DWORD* out = static_cast<DWORD*>(bits);
-    for (int y = 0; y < g_iconPx; ++y) {
-        for (int x = 0; x < g_iconPx; ++x) {
+    for (int y = 0; y < px; ++y) {
+        for (int x = 0; x < px; ++x) {
             int accA = 0, accR = 0, accG = 0, accB = 0;
             for (int sy = 0; sy < ICON_SS; ++sy) {
-                const DWORD* row = big + (size_t)(y * ICON_SS + sy) * g_iconDim + x * ICON_SS;
+                const DWORD* row = big + (size_t)(y * ICON_SS + sy) * dim + x * ICON_SS;
                 for (int sx = 0; sx < ICON_SS; ++sx) {
                     DWORD v = row[sx];
                     int a = (int)((v >> 24) & 0xFF);
@@ -731,13 +686,13 @@ static HICON MakeIcon(int battery) {
             int R = accA ? accR / accA : 0;
             int G = accA ? accG / accA : 0;
             int B = accA ? accB / accA : 0;
-            out[y * g_iconPx + x] = ((DWORD)A << 24) | ((DWORD)R << 16)
-                                  | ((DWORD)G << 8)  |  (DWORD)B;
+            out[y * px + x] = ((DWORD)A << 24) | ((DWORD)R << 16)
+                            | ((DWORD)G << 8)  |  (DWORD)B;
         }
     }
     free(big);
 
-    HBITMAP mask = CreateBitmap(g_iconPx, g_iconPx, 1, 1, nullptr);
+    HBITMAP mask = CreateBitmap(px, px, 1, 1, nullptr);
     ICONINFO ii = {};
     ii.fIcon    = TRUE;
     ii.hbmColor = hbm;
@@ -748,7 +703,30 @@ static HICON MakeIcon(int battery) {
     return icon;
 }
 
+// ─────────────── 托盘图标健康检查 ───────────────
+// 探测托盘图标是否仍在 shell 中，丢失则重新注册
+static bool GetTrayIconRect(HWND owner, UINT id, RECT* out);   // 定义见浮窗面板一节
+static void TrayReAdd();                                      // 定义见下
+
+static void CheckTrayAlive() {
+    if (!g.hwnd || !g.hIcon) return;
+    RECT rc;
+    if (GetTrayIconRect(g.hwnd, TRAY_ICON_ID, &rc)) return;   // 图标健在
+    Dbg(L"健康检查：图标已丢失，重新注册");
+    TrayReAdd();
+}
+
 // ─────────────────────────── 界面刷新 ───────────────────────────
+// NIM_MODIFY 的统一包装：设置本次更新的字段，返回后复位为完整值。
+static const UINT NID_FULL_FLAGS = NIF_ICON | NIF_TIP | NIF_MESSAGE;
+
+static BOOL TrayModify(UINT flags) {
+    g.nid.uFlags = flags;
+    BOOL ok = Shell_NotifyIconW(NIM_MODIFY, &g.nid);
+    g.nid.uFlags = NID_FULL_FLAGS;
+    return ok;
+}
+
 static void RefreshTray() {
     // 重建图标前先销毁旧句柄，否则每次刷新都会泄漏一个 HICON
     HICON old = g.hIcon;
@@ -756,7 +734,7 @@ static void RefreshTray() {
     if (!g.hIcon) g.hIcon = old;          // 绘制失败则沿用旧图标
     else if (old) DestroyIcon(old);
 
-    g.nid.uFlags = NIF_ICON | NIF_TIP | NIF_MESSAGE;
+    g.nid.uFlags = NID_FULL_FLAGS;
     g.nid.hIcon  = g.hIcon;
 
     wchar_t tip[160];
@@ -770,7 +748,7 @@ static void RefreshTray() {
                    g.battery, when);
     }
     wcsncpy_s(g.nid.szTip, tip, _TRUNCATE);
-    Shell_NotifyIconW(NIM_MODIFY, &g.nid);
+    TrayModify(NID_FULL_FLAGS);
 }
 
 // 只更新托盘悬停提示的文字，不读设备、不重绘图标。
@@ -781,10 +759,23 @@ static void RefreshTipOnly() {
     wchar_t tip[160];
     swprintf_s(tip, L"雷柏鼠标电量：%d%%\n上次读取 %s", g.battery, when);
     wcsncpy_s(g.nid.szTip, tip, _TRUNCATE);
-    g.nid.uFlags = NIF_TIP;
-    Shell_NotifyIconW(NIM_MODIFY, &g.nid);
-    g.nid.uFlags = NIF_ICON | NIF_TIP | NIF_MESSAGE;
+    TrayModify(NIF_TIP);
 }
+
+// 重新注册托盘图标。
+static UINT g_wmTaskbarCreated = 0;
+
+static void TrayReAdd() {
+    if (!g.hwnd) return;
+    // 先删一次，避免任务栏已自行恢复时留下重复图标
+    Shell_NotifyIconW(NIM_DELETE, &g.nid);
+    if (!g.hIcon) g.hIcon = MakeIcon(g.haveBattery ? g.battery : -1);
+    g.nid.hIcon  = g.hIcon;
+    g.nid.uFlags = NID_FULL_FLAGS;
+    BOOL ok = Shell_NotifyIconW(NIM_ADD, &g.nid);
+    Dbg(L"任务栏重建：重新注册托盘图标 ok=%d err=%lu", ok, GetLastError());
+}
+
 
 static void DoPoll() {
     if (g.pollBusy) return;
@@ -811,7 +802,7 @@ static void DoPoll() {
         g.haveBattery  = true;
         g.lastGoodTick = NowMs();
     } else {
-        // 读取失败：接收器可能被拔掉或鼠标休眠。关闭句柄，下次重新枚举。
+        // 读取失败：关闭句柄，下次重新枚举
         if (g.hInfo != INVALID_HANDLE_VALUE) {
             CloseHandle(g.hInfo);
             g.hInfo = INVALID_HANDLE_VALUE;
@@ -927,7 +918,7 @@ static int PanelHitTest(int y) {
     return -1;
 }
 
-// 用窗口区域裁出圆角（SetWindowRgn 后由系统接管该区域，无需删除）
+// 用窗口区域裁出圆角
 static void ApplyRoundRegion(HWND hwnd) {
     RECT rc; GetClientRect(hwnd, &rc);
     HRGN rgn = CreateRoundRectRgn(0, 0, rc.right + 1, rc.bottom + 1, CORNER, CORNER);
@@ -1186,17 +1177,14 @@ static bool PointInOurWindows(POINT sp) {
     return false;
 }
 
-// 关闭子菜单：轮询光标位置。
-// 不能用 WM_MOUSELEAVE —— 从面板移向子菜单的途中会先触发父窗口的 leave，
-// 那会在用户还没到达子菜单时就把菜单收掉。
+// 关闭子菜单：轮询光标位置
 static void PollSubClose() {
     if (!g_sub) return;
     POINT sp; GetCursorPos(&sp);
     if (!PointInOurWindows(sp)) CloseSub();
 }
 
-// 点击面板外部即关闭：用 WH_MOUSE_LL 钩子。
-// 不能用 SetCapture —— 那会抢走全部鼠标消息，导致浮窗上的时间戳不再刷新。
+// 点击面板外部即关闭（WH_MOUSE_LL 钩子）
 static HHOOK g_mouseHook = nullptr;
 
 static LRESULT CALLBACK MouseHookProc(int code, WPARAM wp, LPARAM lp) {
@@ -1247,11 +1235,7 @@ static LRESULT CALLBACK PanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (g_panelHot != -1) { g_panelHot = -1; InvalidateRect(hwnd, nullptr, FALSE); }
         return 0;
 
-    // 面板唯一的定时器：
-    //   每 500ms  重绘一次，让「上次读取 时:分:秒」保持新鲜；
-    //             同时检查子菜单是否该收起。
-    //   注意：托盘悬停提示由主窗口的 WM_TIP 定时器每秒刷新，
-    //         这里不要重复刷新，否则两个定时器会互相叠加。
+    // 每 500ms 重绘面板，并检查子菜单是否该收起
     case WM_TIMER:
         if (wp == WM_PANELTICK) {
             InvalidateRect(hwnd, nullptr, FALSE);
@@ -1316,7 +1300,6 @@ static void RegisterPanelClass(HINSTANCE inst) {
 }
 
 // 取托盘图标自身的屏幕矩形，用于把浮窗贴到它上方。
-// Shell_NotifyIconGetRect 从 shell32 动态获取，兼容旧系统。
 static bool GetTrayIconRect(HWND owner, UINT id, RECT* out) {
     typedef HRESULT (WINAPI *PFN)(const NOTIFYICONIDENTIFIER*, RECT*);
     static PFN pfn = nullptr;
@@ -1363,9 +1346,7 @@ static void TogglePanel() {
         }
     }
 
-    // 兜底：钳制到所在显示器工作区内。
-    // 若 Shell_TrayWnd 返回异常值（多屏或非标准缩放时可能发生），
-    // 直接使用会算出屏幕外坐标 —— 面板「创建成功但看不见」。
+    // 钳制到所在显示器工作区内
     {
         POINT pt = { x, y };
         HMONITOR mon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
@@ -1398,21 +1379,42 @@ static void TogglePanel() {
 
 // ─────────────────────────── 主窗口过程 ───────────────────────────
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    // 任务栏重建消息：消息号为运行时取得，故用 if 比较
+    if (g_wmTaskbarCreated && msg == g_wmTaskbarCreated) {
+        Dbg(L"收到 TaskbarCreated");
+        TrayReAdd();
+        return 0;
+    }
+
     switch (msg) {
     case WM_TRAY:
-        // 左键和右键都切换浮窗
+        // 左右键都切换浮窗；默认通知语义下 lParam 即鼠标消息
+        Dbg(L"[diag] WM_TRAY wp=0x%zX lp=0x%zX LOWORD(lp)=0x%04X → %s",
+            (size_t)wp, (size_t)lp, (unsigned)LOWORD(lp),
+            (LOWORD(lp) == WM_LBUTTONUP || LOWORD(lp) == WM_RBUTTONUP) ? L"切换浮窗" : L"忽略");
         if (LOWORD(lp) == WM_LBUTTONUP || LOWORD(lp) == WM_RBUTTONUP) TogglePanel();
         return 0;
 
-    // ⚠ SetTimer(hwnd, id, ...) 到点投递的是 WM_TIMER，定时器 id 在 wParam 里，
-    //   而不是投递一个以该 id 命名的自定义消息。
-    //   早期版本误写成 case WM_POLL，导致轮询只在启动时执行过一次。
+    // 显示器缩放变了：重算图标尺寸并重绘
+    case WM_DPICHANGED:
+        Dbg(L"WM_DPICHANGED: newDpi=%u", HIWORD(wp));
+        RefreshTray();
+        return 0;
+
+    // SetTimer 到点投递 WM_TIMER，定时器 id 在 wParam 中
     case WM_TIMER:
         if (wp == WM_POLL) {
             KillTimer(hwnd, WM_POLL);
             DoPoll();
         } else if (wp == WM_TIP) {
             RefreshTipOnly();   // 只刷新悬停提示，不读设备
+
+            // 每 TRAY_HEALTH_TICKS 次做一次托盘图标健康检查
+            static int s_healthTick = 0;
+            if (++s_healthTick >= TRAY_HEALTH_TICKS) {
+                s_healthTick = 0;
+                CheckTrayAlive();
+            }
         }
         return 0;
 
@@ -1452,7 +1454,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 // ─────────────────────────── 入口 ───────────────────────────
-// --test-tray：逐步执行托盘注册并打印结果，用于定位注册失败的原因
+// --test-tray：逐步执行托盘注册并打印每步结果
 static int RunTraySelfTest(HINSTANCE hInst) {
     printf("=== tray self test ===\n\n");
 
@@ -1514,7 +1516,7 @@ static int RunTraySelfTest(HINSTANCE hInst) {
     return 0;
 }
 
-// --read [次数]：只读取并打印电量，不创建窗口/托盘，便于命令行验证协议实现
+// --read [次数]：只读取并打印电量，不创建窗口/托盘
 static int RunReadTest(LPWSTR lpCmdLine) {
     int times = 1;
     const wchar_t* p = wcsstr(lpCmdLine, L"--read");
@@ -1551,8 +1553,14 @@ static int RunReadTest(LPWSTR lpCmdLine) {
 }
 
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR lpCmdLine, int) {
-    if (lpCmdLine && wcsstr(lpCmdLine, L"--test-tray")) return RunTraySelfTest(hInst);
-    if (lpCmdLine && wcsstr(lpCmdLine, L"--read"))      return RunReadTest(lpCmdLine);
+    const bool wantRead = lpCmdLine && wcsstr(lpCmdLine, L"--read");
+    const bool wantSelfTest = lpCmdLine && wcsstr(lpCmdLine, L"--test-tray");
+    if (wantRead || wantSelfTest) {
+                // 打印诊断信息并退出
+        int rc = wantSelfTest ? RunTraySelfTest(hInst) : RunReadTest(lpCmdLine);
+        fflush(stdout);
+        return rc;
+    }
 
     Dbg(L"=== 启动 ===");
     g.hInst = hInst;
@@ -1562,10 +1570,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR lpCmdLine, int) {
 
     CleanUpLegacyScheduledTask();
 
-    // 单实例互斥。
-    // ⚠ GetLastError() 必须在任何其他函数调用之前读取 —— Dbg() 内部会写文件、
-    //   取时间、格式化字符串，这些调用会覆盖线程的 last-error 值，
-    //   早期版本因此把「首次启动」误判成「已有实例在运行」。
+    // 单实例互斥；GetLastError() 必须紧接 CreateMutexW 读取
     SetLastError(0);
     HANDLE mutex = CreateMutexW(nullptr, FALSE, L"RapoBattery_SingleInstance");
     DWORD mutexErr = GetLastError();
@@ -1584,6 +1589,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR lpCmdLine, int) {
     wc.lpszClassName = WND_CLASS;
     if (!RegisterClassExW(&wc)) return 1;
 
+        // 主窗口（message-only）
     g.hwnd = CreateWindowExW(0, WND_CLASS, L"RapoBattery", 0, 0, 0, 0, 0,
                              HWND_MESSAGE, nullptr, hInst, nullptr);
     if (!g.hwnd) {
@@ -1592,6 +1598,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR lpCmdLine, int) {
                                  nullptr, nullptr, hInst, nullptr);
     }
     if (!g.hwnd) { Dbg(L"无法创建窗口，退出"); return 2; }
+
+    // 任务栏重建消息。必须在窗口创建后、注册图标前取到，供 WndProc 比较。
+    g_wmTaskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
+    Dbg(L"TaskbarCreated 消息号=%u", g_wmTaskbarCreated);
 
     g.nid.cbSize           = sizeof(g.nid);
     g.nid.hWnd             = g.hwnd;
@@ -1611,6 +1621,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR lpCmdLine, int) {
     }
 
     DoPoll();   // 首次读取，并按当前间隔起表
+
+    // 起表刷新悬停提示的定时器
+    SetTimer(g.hwnd, WM_TIP, TIP_REFRESH_MS, nullptr);
 
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {

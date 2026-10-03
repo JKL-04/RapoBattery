@@ -75,8 +75,7 @@ cl /nologo /W3 /O2 /EHsc /std:c++17 /utf-8 RapoBattery.cpp RapoBattery.res ^
 ├── tools/
 │   ├── svg2cpp.py            
 │   ├── svg2ico.py            
-│   ├── render_icons.py       
-│   └── bmp2png.py            
+│   └── render_icons.py       
 ├── assets/
 │   ├── svg/                  
 │   └── *.png                 
